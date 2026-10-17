@@ -9,18 +9,17 @@
 #      `(0.0, 0.2, 0.4, 0.6, 0.8, 1.0)`, `hallucination_silence_threshold=1.5`,
 #      and `repetition_penalty=1.1` so accuracy stays sharp from start to end!
 #   2. 🧠 Whole-Text Context-Aware Translation (`translate_segments_full_context`):
-#      - Instead of isolated line-by-line translation, combines subtitle cues into
-#        coherent multi-sentence passages, translates with full context, and
-#        splits/aligns the translation back to each exact subtitle cue!
-#   3. 🎓 Built-in Classroom Sample Clips (`samples/` directory + Auto-Generator):
-#      - Students can load pre-packaged sample clips directly from a dropdown
-#        for in-class C-E / E-C subtitling & post-editing practice.
-#   4. 🧭 Comprehensive C-E & E-C Audiovisual Post-Editing Skills (Tab 2 + Auto-Detector):
-#      - Full bilingual guide and automatic strategy tagging for De-Translationese,
-#        Parataxis/Hypotaxis, Zero-Pronoun Restoration, Passive-to-Active,
-#        Nominal-to-Verbal shift, Idiom Transcreation, Dual-Speaker formatting,
-#        and CPS Reading-Speed Condensation.
-#   5. ➕🗑️ Full Add, Delete & Split Subtitle Functions in the Workbench Panel.
+#      - Combines subtitle cues into coherent multi-sentence passages, translates
+#        with full context, and splits/aligns back to each exact subtitle cue!
+#   3. 🔥 True ASS (Advanced SubStation Alpha) Hard-Burn Video Alignment:
+#      - Hard-burned MP4 output (`burn_subtitles_to_mp4`) now uses a custom `.ass`
+#        subtitle generator (`write_ass_file`) that honors the user's exact
+#        Presentation Mode (`bilingual_target_top`, `bilingual_source_top`,
+#        `target_only`, `source_only`), Font Size slider, Dual-Color hierarchy
+#        (Target in Bold Yellow #FDE047 @ 100% size; Source in White #F8FAFC @ 76%
+#        size for bilingual, or 100% for monolingual), and multi-line breaks!
+#   4. 🎓 Built-in Classroom Sample Clips (`samples/` directory + Auto-Generator).
+#   5. 🧭 Comprehensive C-E & E-C Audiovisual Post-Editing Skills (Tab 2 + PDF).
 # ==============================================================================
 
 import concurrent.futures
@@ -151,7 +150,11 @@ from reportlab.platypus import (
 # Global State, Directories, Sample Clips & Verified T4 GPU ASR / MT Models
 # ==============================================================================
 
-APP_ROOT_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
+APP_ROOT_DIR = (
+    os.path.dirname(os.path.abspath(__file__))
+    if "__file__" in globals()
+    else os.getcwd()
+)
 SAMPLES_DIR = os.path.join(APP_ROOT_DIR, "samples")
 os.makedirs(SAMPLES_DIR, exist_ok=True)
 
@@ -322,9 +325,11 @@ PRESENTATION_MODE_CHOICES = [
         "Bilingual: Source Top + Target Bottom / 雙語：原文在上＋譯文在下",
         "bilingual_source_top",
     ),
-    ("Translated Only / 僅顯示譯文", "target_only"),
-    ("Original Only / 僅顯示原文", "source_only"),
+    ("Translated Only (Monolingual Target) / 僅顯示譯文（單語）", "target_only"),
+    ("Original Only (Monolingual Source) / 僅顯示原文（單語）", "source_only"),
 ]
+
+PRESENTATION_MODE_LABELS = {val: label for label, val in PRESENTATION_MODE_CHOICES}
 
 WHISPER_ISO_MAP = {
     "auto": None,
@@ -392,8 +397,12 @@ def ensure_builtin_sample_clips() -> List[Tuple[str, str]]:
         try:
             from gtts import gTTS
 
-            en_mp4 = os.path.join(SAMPLES_DIR, "sample_01_EC_tech_keynote_practice.mp4")
-            zh_mp4 = os.path.join(SAMPLES_DIR, "sample_02_CE_cultural_interview_practice.mp4")
+            en_mp4 = os.path.join(
+                SAMPLES_DIR, "sample_01_EC_tech_keynote_practice.mp4"
+            )
+            zh_mp4 = os.path.join(
+                SAMPLES_DIR, "sample_02_CE_cultural_interview_practice.mp4"
+            )
 
             if not os.path.exists(en_mp4):
                 en_script = (
@@ -540,6 +549,34 @@ def get_video_codec_name(video_path: str) -> str:
         return ""
 
 
+def get_video_dimensions(video_path: str) -> Tuple[int, int]:
+    """Returns (width, height) of the video so ASS subtitle font scaling matches the exact resolution."""
+    try:
+        cmd = [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=s=x:p=0",
+            video_path,
+        ]
+        out = (
+            subprocess.check_output(cmd, stderr=subprocess.STDOUT, text=True)
+            .strip()
+            .lower()
+        )
+        if "x" in out:
+            w_str, h_str = out.split("x")[:2]
+            return max(320, int(w_str)), max(240, int(h_str))
+    except Exception:
+        pass
+    return 1280, 720
+
+
 def make_gradio_file_url(file_path: str) -> str:
     """Returns a fast HTTP streaming URL served by Gradio (no Base64 lag!)."""
     abs_path = os.path.abspath(file_path)
@@ -623,7 +660,7 @@ def build_dynamic_status_banner(
 
 
 # ==============================================================================
-# Helper Functions: Time, Multi-Line Normalization, SRT/VTT, Project Backup
+# Helper Functions: Time, Multi-Line Normalization, SRT/VTT/ASS, Project Backup
 # ==============================================================================
 
 
@@ -650,6 +687,18 @@ def seconds_to_srt_time(seconds: float) -> str:
 
 def seconds_to_vtt_time(seconds: float) -> str:
     return seconds_to_srt_time(seconds).replace(",", ".")
+
+
+def seconds_to_ass_time(seconds: float) -> str:
+    """Formats seconds into ASS timestamp `H:MM:SS.cc` (centiseconds)."""
+    seconds = max(0.0, float(seconds))
+    hrs = int(seconds // 3600)
+    mins = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    centis = int(round((seconds - int(seconds)) * 100))
+    if centis >= 100:
+        centis = 99
+    return f"{hrs:d}:{mins:02d}:{secs:02d}.{centis:02d}"
 
 
 def parse_flexible_time(val: Any) -> float:
@@ -695,8 +744,9 @@ def compose_presentation_lines(
     if mode == "bilingual_source_top":
         return src_lines + tgt_lines
     if mode == "source_only":
-        return src_lines if src_lines else tgt_lines
-    return tgt_lines if tgt_lines else src_lines
+        return src_lines
+    # Default: target_only
+    return tgt_lines
 
 
 def write_srt_file(
@@ -755,6 +805,116 @@ def write_vtt_file(
     return path
 
 
+def escape_ass_text(text: str) -> str:
+    """Escapes special characters for ASS subtitle dialogue lines and converts `\n` to `\\N`."""
+    clean = normalize_multiline_text(text)
+    if not clean:
+        return ""
+    clean = clean.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
+    lines = [ln.strip() for ln in clean.split("\n") if ln.strip()]
+    return "\\N".join(lines)
+
+
+def write_ass_file(
+    segments: List[Dict[str, Any]],
+    path: str,
+    mode: str = "bilingual_target_top",
+    font_size: int = 20,
+) -> str:
+    """
+    Generates an Advanced SubStation Alpha (.ASS) subtitle file so FFmpeg hard-burn
+    matches the user's exact Presentation Mode & Font Size:
+      - `bilingual_target_top`: Target Top (Bold Yellow #FDE047, 100% size) + Source Bottom (White #F8FAFC, 76% size)
+      - `bilingual_source_top`: Source Top (White #F8FAFC, 76% size) + Target Bottom (Bold Yellow #FDE047, 100% size)
+      - `target_only`: Monolingual Target Only (Bold Yellow #FDE047, 100% size)
+      - `source_only`: Monolingual Source Only (White #F8FAFC, 100% size)
+    Uses fixed PlayResX=1280, PlayResY=720 so `font_size` in px scales identically on any video resolution.
+    """
+    # Scale the HTML player px font size (which renders on ~640px wide player) to 1280x720 canvas
+    main_fs = max(18, int(round(int(font_size or 20) * 1.65)))
+    sub_fs = max(14, int(round(main_fs * 0.76)))
+
+    # ASS colors are &HAABBGGRR (Alpha, Blue, Green, Red)
+    # Yellow (#FDE047 -> R=FD, G=E0, B=47) => &H0047E0FD
+    # White  (#F8FAFC -> R=F8, G=FA, B=FC) => &H00FCFAF8
+    # Dark semi-transparent box (#020617 @ ~78% opacity) => &H38170602
+    ass_header = f"""[Script Info]
+Title: SubCraft-PE Hard-Burn Subtitles ({mode})
+ScriptType: v4.00+
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+YCbCr Matrix: TV.709
+PlayResX: 1280
+PlayResY: 720
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: TargetMain,Noto Sans CJK TC,{main_fs},&H0047E0FD,&H0047E0FD,&H38170602,&H38170602,-1,0,0,0,100,100,0,0,3,6,0,2,40,40,34,1
+Style: SourceSub,Noto Sans CJK TC,{sub_fs},&H00FCFAF8,&H00FCFAF8,&H45170602,&H45170602,0,0,0,0,100,100,0,0,3,5,0,2,40,40,34,1
+Style: SourceMain,Noto Sans CJK TC,{main_fs},&H00FCFAF8,&H00FCFAF8,&H38170602,&H38170602,-1,0,0,0,100,100,0,0,3,6,0,2,40,40,34,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    events: List[str] = []
+    for seg in segments:
+        start_s = parse_flexible_time(seg.get("start", 0.0))
+        end_s = max(
+            start_s + 0.15, parse_flexible_time(seg.get("end", start_s + 0.8))
+        )
+        start_ass = seconds_to_ass_time(start_s)
+        end_ass = seconds_to_ass_time(end_s)
+
+        src_ass = escape_ass_text(seg.get("source", ""))
+        tgt_ass = escape_ass_text(seg.get("target", ""))
+
+        if mode == "bilingual_target_top":
+            if tgt_ass and src_ass:
+                combined = f"{tgt_ass}\\N{{\\rSourceSub}}{src_ass}"
+                events.append(
+                    f"Dialogue: 0,{start_ass},{end_ass},TargetMain,,0,0,0,,{combined}"
+                )
+            elif tgt_ass:
+                events.append(
+                    f"Dialogue: 0,{start_ass},{end_ass},TargetMain,,0,0,0,,{tgt_ass}"
+                )
+            elif src_ass:
+                events.append(
+                    f"Dialogue: 0,{start_ass},{end_ass},SourceMain,,0,0,0,,{src_ass}"
+                )
+
+        elif mode == "bilingual_source_top":
+            if src_ass and tgt_ass:
+                combined = f"{src_ass}\\N{{\\rTargetMain}}{tgt_ass}"
+                events.append(
+                    f"Dialogue: 0,{start_ass},{end_ass},SourceSub,,0,0,0,,{combined}"
+                )
+            elif src_ass:
+                events.append(
+                    f"Dialogue: 0,{start_ass},{end_ass},SourceMain,,0,0,0,,{src_ass}"
+                )
+            elif tgt_ass:
+                events.append(
+                    f"Dialogue: 0,{start_ass},{end_ass},TargetMain,,0,0,0,,{tgt_ass}"
+                )
+
+        elif mode == "source_only":
+            if src_ass:
+                events.append(
+                    f"Dialogue: 0,{start_ass},{end_ass},SourceMain,,0,0,0,,{src_ass}"
+                )
+
+        else:  # target_only (Monolingual Translated Only)
+            if tgt_ass:
+                events.append(
+                    f"Dialogue: 0,{start_ass},{end_ass},TargetMain,,0,0,0,,{tgt_ass}"
+                )
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(ass_header + "\n".join(events) + "\n")
+    return path
+
+
 def save_project_checkpoint_json(
     current_segments: List[Dict[str, Any]],
     baseline_segments: List[Dict[str, Any]],
@@ -763,7 +923,7 @@ def save_project_checkpoint_json(
     out_dir: str,
 ) -> str:
     payload = {
-        "version": "3.0",
+        "version": "3.1",
         "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "presentation_mode": presentation_mode,
         "font_size": int(font_size or 20),
@@ -1415,11 +1575,16 @@ def split_translated_sentence_proportionally(
                 break
             acc_src += max(1, source_lengths[i])
             target_idx = int(round((acc_src / total_src) * total_chars))
-            target_idx = max(cursor + 1, min(total_chars - (n - 1 - i), target_idx))
+            target_idx = max(
+                cursor + 1, min(total_chars - (n - 1 - i), target_idx)
+            )
             best_idx = target_idx
             for delta in range(0, 7):
                 for cand in (target_idx + delta, target_idx - delta):
-                    if cursor < cand < total_chars and clean[cand - 1] in "，。！？；、,.;!? ":
+                    if (
+                        cursor < cand < total_chars
+                        and clean[cand - 1] in "，。！？；、,.;!? "
+                    ):
                         best_idx = cand
                         break
                 if best_idx != target_idx:
@@ -1495,7 +1660,11 @@ def translate_segments_full_context(
     current_group: List[int] = []
 
     for idx, seg in enumerate(segments):
-        src_txt = normalize_multiline_text(seg.get("source", "")).replace("\n", " ").strip()
+        src_txt = (
+            normalize_multiline_text(seg.get("source", ""))
+            .replace("\n", " ")
+            .strip()
+        )
         current_group.append(idx)
         is_end = bool(sent_end_re.search(src_txt))
         if is_end or len(current_group) >= 3:
@@ -1509,10 +1678,14 @@ def translate_segments_full_context(
     cur_chars = 0
     for s_group in sentence_groups:
         s_text = " ".join(
-            normalize_multiline_text(segments[i].get("source", "")).replace("\n", " ").strip()
+            normalize_multiline_text(segments[i].get("source", ""))
+            .replace("\n", " ")
+            .strip()
             for i in s_group
         )
-        if cur_batch and (len(cur_batch) >= 12 or cur_chars + len(s_text) > 1400):
+        if cur_batch and (
+            len(cur_batch) >= 12 or cur_chars + len(s_text) > 1400
+        ):
             passage_batches.append(cur_batch)
             cur_batch = []
             cur_chars = 0
@@ -1536,9 +1709,13 @@ def translate_segments_full_context(
         group_source_texts: List[str] = []
         for g_idx, cue_indices in enumerate(s_groups, start=1):
             merged_src = " ".join(
-                normalize_multiline_text(segments[i].get("source", "")).replace("\n", " ").strip()
+                normalize_multiline_text(segments[i].get("source", ""))
+                .replace("\n", " ")
+                .strip()
                 for i in cue_indices
-                if normalize_multiline_text(segments[i].get("source", "")).strip()
+                if normalize_multiline_text(
+                    segments[i].get("source", "")
+                ).strip()
             )
             group_source_texts.append(merged_src)
             tagged_lines.append(f"[{g_idx}] {merged_src}")
@@ -1580,7 +1757,14 @@ def translate_segments_full_context(
                 out_map[cue_indices[0]] = trans_sent
             else:
                 src_lengths = [
-                    max(1, len(normalize_multiline_text(segments[i].get("source", ""))))
+                    max(
+                        1,
+                        len(
+                            normalize_multiline_text(
+                                segments[i].get("source", "")
+                            )
+                        ),
+                    )
                     for i in cue_indices
                 ]
                 split_parts = split_translated_sentence_proportionally(
@@ -1642,9 +1826,21 @@ COLLECT_WORKBENCH_JS = """
         });
     });
     const modeSelect = document.getElementById('pe-wb-mode-select');
-    const selectedMode = modeSelect ? modeSelect.value : pres_mode;
+    const initMode = container.getAttribute('data-init-mode') || '';
+    let selectedMode = pres_mode;
+    if (modeSelect) {
+        if (modeSelect.getAttribute('data-user-changed') === '1' || pres_mode === initMode) {
+            selectedMode = modeSelect.value;
+        }
+    }
     const fontSlider = document.getElementById('pe-wb-fontsize-slider');
-    const selectedFontSize = fontSlider ? parseInt(fontSlider.value, 10) : font_sz;
+    const initFs = parseInt(container.getAttribute('data-init-fs') || '20', 10);
+    let selectedFontSize = parseInt(font_sz || 20, 10);
+    if (fontSlider) {
+        if (fontSlider.getAttribute('data-user-changed') === '1' || selectedFontSize === initFs) {
+            selectedFontSize = parseInt(fontSlider.value, 10);
+        }
+    }
     const payloadObj = {
         segments: collected,
         presentation_mode: selectedMode,
@@ -1729,11 +1925,11 @@ def build_bilingual_workbench_html(
         "  l2.textContent=activeTgt; l2.style.display=(activeSrc&&activeTgt)?'inline-block':'none';"
         "  l2.style.color='#fde047'; l2.style.fontSize=mainFs+'px';"
         "}else if(mode==='target_only'){"
-        "  l1.textContent=activeTgt||activeSrc; l1.style.display=(activeTgt||activeSrc)?'inline-block':'none';"
+        "  l1.textContent=activeTgt; l1.style.display=activeTgt?'inline-block':'none';"
         "  l1.style.color='#fde047'; l1.style.fontSize=mainFs+'px';"
         "  l2.style.display='none';"
         "}else{"
-        "  l1.textContent=activeSrc||activeTgt; l1.style.display=(activeSrc||activeTgt)?'inline-block':'none';"
+        "  l1.textContent=activeSrc; l1.style.display=activeSrc?'inline-block':'none';"
         "  l1.style.color='#f8fafc'; l1.style.fontSize=mainFs+'px';"
         "  l2.style.display='none';"
         "}"
@@ -2063,7 +2259,7 @@ def build_bilingual_workbench_html(
         )
 
     return f"""
-    <div id="pe-workbench-container" data-run-stamp="{run_stamp}" style="background:#0f172a;color:#f8fafc;padding:16px;border-radius:14px;border:1px solid #334155;font-family:system-ui,-apple-system,sans-serif;">
+    <div id="pe-workbench-container" data-run-stamp="{run_stamp}" data-init-mode="{html.escape(presentation_mode)}" data-init-fs="{font_size}" style="background:#0f172a;color:#f8fafc;padding:16px;border-radius:14px;border:1px solid #334155;font-family:system-ui,-apple-system,sans-serif;">
         <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid #1e293b;">
             <div>
                 <h3 style="margin:0;font-size:17px;color:#38bdf8;">🎬 SubCraft-PE: Live Bilingual Video & Student-Safe Post-Editing Workbench</h3>
@@ -2088,13 +2284,13 @@ def build_bilingual_workbench_html(
                 <div style="display:flex;align-items:center;gap:6px;background:#1e293b;padding:5px 10px;border-radius:8px;border:1px solid #475569;">
                     <label style="font-size:12px;color:#fde047;font-weight:700;">🔠 Font Size:</label>
                     <input id="pe-wb-fontsize-slider" type="range" min="12" max="38" step="1" value="{font_size}"
-                        oninput="{autosave_and_refresh_js}"
+                        oninput="this.setAttribute('data-user-changed','1');{autosave_and_refresh_js}"
                         style="width:105px;cursor:pointer;accent-color:#38bdf8;">
                     <span id="pe-wb-fontsize-val" style="font-size:12px;font-weight:700;color:#38bdf8;min-width:34px;">{font_size}px</span>
                 </div>
                 <div style="display:flex;align-items:center;gap:6px;">
-                    <label style="font-size:12px;color:#cbd5e1;font-weight:600;">📺 Mode:</label>
-                    <select id="pe-wb-mode-select" onchange="{autosave_and_refresh_js}"
+                    <label style="font-size:12px;color:#cbd5e1;font-weight:600;">📺 Mode (Live &amp; Hard-Burn):</label>
+                    <select id="pe-wb-mode-select" onchange="this.setAttribute('data-user-changed','1');{autosave_and_refresh_js}"
                         style="background:#1e293b;color:#f8fafc;border:1px solid #38bdf8;border-radius:8px;padding:6px 10px;font-size:12px;font-weight:600;">
                         {''.join(mode_options_html)}
                     </select>
@@ -2123,7 +2319,7 @@ def build_bilingual_workbench_html(
                     </div>
                 </div>
                 <div style="padding:10px 14px;background:#0f172a;border-top:1px solid #1e293b;display:flex;justify-content:space-between;align-items:center;font-size:12px;color:#94a3b8;flex-wrap:wrap;gap:6px;">
-                    <span>➕ Add After | ✂️ Split | 🗑️ Delete | 💾 Click Step 2 below to export</span>
+                    <span>➕ Add After | ✂️ Split | 🗑️ Delete | 🔥 Hard-Burn MP4 matches selected Mode &amp; Font Size</span>
                     <span>Total Spoken Cues: <b id="pe-total-cues-count" style="color:#38bdf8;">{len(display_segments)}</b></span>
                 </div>
             </div>
@@ -2192,7 +2388,16 @@ def detect_pe_strategies(
                 "E-C Passive-to-Active & Nominal-to-Verbal Shift (英譯中：去被動式與抽象名詞轉動詞)"
             )
 
-        translationese_markers = ["的", "了", "們", "一個", "這是一個", "它是", "他的", "她的"]
+        translationese_markers = [
+            "的",
+            "了",
+            "們",
+            "一個",
+            "這是一個",
+            "它是",
+            "他的",
+            "她的",
+        ]
         if sum(pe_norm.count(m) for m in translationese_markers) < sum(
             mt_norm.count(m) for m in translationese_markers
         ):
@@ -2200,14 +2405,27 @@ def detect_pe_strategies(
                 "E-C De-Translationese & Redundant Pronoun/Particle Pruning (英譯中：去歐化翻譯腔與省譯代詞／虛詞)"
             )
 
-        # Check Parataxis (flowing short clauses)
-        if pe_norm.count("，") != mt_norm.count("，") or pe_norm.endswith(("吧", "呢", "啊", "喔", "嗎")):
+        if pe_norm.count("，") != mt_norm.count("，") or pe_norm.endswith(
+            ("吧", "呢", "啊", "喔", "嗎")
+        ):
             strategies.append(
                 "E-C Parataxis Bamboo Clauses & Spoken Particle Polish (英譯中：化整為零流水句與口語語氣詞潤飾)"
             )
     else:
         # 3. C-E Specific Skills (Topic-Comment to SVO, Hypotaxis Connectives, Concise Prepositional Phrases)
-        connectives = {"because", "although", "while", "since", "unless", "therefore", "however", "when", "if", "which", "that"}
+        connectives = {
+            "because",
+            "although",
+            "while",
+            "since",
+            "unless",
+            "therefore",
+            "however",
+            "when",
+            "if",
+            "which",
+            "that",
+        }
         mt_words = set(re.findall(r"\b[a-z]+\b", mt_norm.lower()))
         pe_words = set(re.findall(r"\b[a-z]+\b", pe_norm.lower()))
         if len(pe_words & connectives) > len(mt_words & connectives):
@@ -2451,12 +2669,16 @@ def generate_pe_report_pdf(
             Paragraph("<b>Source Speech (原文)</b>", header_style),
             Paragraph("<b>Raw MT Baseline (原始機譯)</b>", header_style),
             Paragraph("<b>Post-Edited Final (譯後定稿)</b>", header_style),
-            Paragraph("<b>Status & Applied Strategies (譯後編輯策略)</b>", header_style),
+            Paragraph(
+                "<b>Status & Applied Strategies (譯後編輯策略)</b>", header_style
+            ),
         ]
     ]
 
     def _fmt_multiline_pdf(txt: str) -> str:
-        return html.escape(normalize_multiline_text(txt)).replace("\n", "<br/>")
+        return html.escape(normalize_multiline_text(txt)).replace(
+            "\n", "<br/>"
+        )
 
     for idx, curr in enumerate(current_segments, start=1):
         b_seg = base_map.get(idx, curr)
@@ -2520,7 +2742,9 @@ def generate_pe_report_pdf(
             for k, v in sorted(strategy_counter.items(), key=lambda x: -x[1])
         )
     else:
-        strat_summary = "No post-editing modifications recorded yet (Raw MT accepted)."
+        strat_summary = (
+            "No post-editing modifications recorded yet (Raw MT accepted)."
+        )
 
     story.append(Spacer(1, 2 * mm))
     story.append(
@@ -2589,9 +2813,9 @@ CE_EC_STRATEGY_GUIDE_HTML = """
             <div style="font-size:12px;color:#cbd5e1;margin-top:4px;"><b>Chinese:</b> ≤ 14–16 chars/line (4–5 CPS)<br><b>English:</b> ≤ 42 chars/line (15–17 CPS)<br>Max <b>2 lines</b> per subtitle cue.</div>
         </div>
         <div style="background:#1e293b;padding:14px;border-radius:10px;border-left:4px solid #a855f7;">
-            <div style="font-size:12px;color:#94a3b8;font-weight:700;">🈯 Chinese &amp; ZH-EN SOTA</div>
-            <div style="font-size:16px;font-weight:700;color:#f8fafc;margin-top:4px;">Belle-whisper-large-v3-turbo-zh</div>
-            <div style="font-size:12px;color:#cbd5e1;margin-top:4px;">Ideal when the source video is in Mandarin Chinese or features heavy Chinese-English code-switching.</div>
+            <div style="font-size:12px;color:#94a3b8;font-weight:700;">🔥 True ASS Hard-Burn Alignment</div>
+            <div style="font-size:16px;font-weight:700;color:#f8fafc;margin-top:4px;">Bilingual &amp; Monolingual MP4</div>
+            <div style="font-size:12px;color:#cbd5e1;margin-top:4px;">Hard-burned MP4 videos honor your exact <b>Mode</b> (Bilingual Target-Top, Bilingual Source-Top, Target-Only, Source-Only) and <b>Font Size</b>.</div>
         </div>
     </div>
 
@@ -3060,7 +3284,7 @@ def run_step1_pipeline(
     done_banner = build_dynamic_status_banner(
         "done",
         f"Ready! {len(segments)} Cues ({effective_asr_model} + Whole-Context {mt_engine_choice})",
-        "Practice C-E / E-C post-editing in the Workbench below, then click Step 2 to generate your Strategy PDF Report!",
+        "Practice C-E / E-C post-editing in the Workbench below, then click Step 2 or Burn MP4!",
         pct=100,
         elapsed_sec=total_elapsed,
     )
@@ -3273,14 +3497,15 @@ def apply_html_workbench_edits(
     )
     report_html = generate_pe_comparison_report(baseline_segments, segments)
     stamp = time.strftime("%H:%M:%S")
+    mode_human = PRESENTATION_MODE_LABELS.get(chosen_mode, chosen_mode)
     status_msg = (
         f"[{stamp}] ✅ Saved & Applied Workbench edits ({len(segments)} segments, "
-        f"C-E / E-C Strategy PDF report & JSON backup updated, mode={chosen_mode}, font={chosen_font_size}px)!"
+        f"Mode='{mode_human}', Font={chosen_font_size}px, SRT/VTT/PDF/JSON updated)!"
     )
     done_banner = build_dynamic_status_banner(
         "done",
-        f"Saved & Applied Edits ({len(segments)} segments) + Updated C-E / E-C PDF Report",
-        "All SRT, VTT, PDF Summary Report & JSON Checkpoint files are ready for download below!",
+        f"Saved & Applied Edits ({len(segments)} segments • {mode_human})",
+        "All SRT, VTT, C-E / E-C PDF Summary Report & JSON Checkpoint files are ready for download below!",
         pct=100,
         elapsed_sec=0.1,
     )
@@ -3376,7 +3601,7 @@ def restore_from_uploaded_or_server_backup(
         report_html,
         orig_srt_path,
         bilingual_srt_path,
-        bilingual_vtt_path,
+        bilingual_vtt_file_path := bilingual_vtt_path,
         pdf_report_path,
         json_backup_path,
         status_msg,
@@ -3392,6 +3617,15 @@ def burn_subtitles_to_mp4(
     baseline_json_str: str,
     prepared_video: Optional[str],
 ) -> Generator[Tuple[Any, ...], None, None]:
+    """
+    Hard-burns subtitles into the MP4 video using an Advanced SubStation Alpha (.ASS)
+    file (`write_ass_file`) so the output video 100% aligns with the user's chosen:
+      - Presentation Mode (`bilingual_target_top`, `bilingual_source_top`, `target_only`, `source_only`)
+      - Font Size (`12px–38px`)
+      - Dual-Color Styling (Target in Bold Yellow #FDE047; Source in Crisp White #F8FAFC)
+      - Multi-line breaks (`Enter` / Dual-Speaker `- A / - B`)
+    Also syncs the Gradio Mode Dropdown and Font Size Slider with the Workbench selection.
+    """
     if not prepared_video or not os.path.exists(prepared_video):
         raise gr.Error(
             "Please run Step 1 first so a video clip is ready! / 請先執行步驟 1！"
@@ -3401,21 +3635,25 @@ def burn_subtitles_to_mp4(
     segments, chosen_mode, chosen_font_size = parse_workbench_or_state_segments(
         wb_json_str, current_json_str, presentation_mode, font_size
     )
+    mode_human = PRESENTATION_MODE_LABELS.get(chosen_mode, chosen_mode)
 
     out_dir = tempfile.mkdtemp(prefix="burned_bilingual_")
-    srt_path = os.path.join(out_dir, "burn.srt")
-    write_srt_file(segments, srt_path, mode=chosen_mode)
+    ass_path = os.path.join(out_dir, "burn_aligned.ass")
+    write_ass_file(
+        segments,
+        ass_path,
+        mode=chosen_mode,
+        font_size=int(chosen_font_size),
+    )
 
-    burned_mp4 = os.path.join(out_dir, "bilingual_burned_output.mp4")
-    escaped_srt = (
-        srt_path.replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
+    mode_slug = chosen_mode.replace("_", "-")
+    burned_mp4 = os.path.join(
+        out_dir, f"subcraft_burned_{mode_slug}_{int(chosen_font_size)}px.mp4"
     )
-    style = (
-        f"FontName=Noto Sans CJK TC,FontSize={int(chosen_font_size)},"
-        f"PrimaryColour=&H0047E0FD,OutlineColour=&H00000000,"
-        f"BackColour=&H80000000,BorderStyle=3,Outline=1,Shadow=0,MarginV=18"
+    escaped_ass = (
+        ass_path.replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
     )
-    vf_arg = f"subtitles='{escaped_srt}':force_style='{style}'"
+    vf_arg = f"ass='{escaped_ass}'"
 
     use_nvenc = has_nvenc_support()
     enc_tag = "GPU h264_nvenc" if use_nvenc else "CPU libx264 ultrafast"
@@ -3423,11 +3661,13 @@ def burn_subtitles_to_mp4(
     yield (
         gr.skip(),
         gr.skip(),
-        f"[  0.1s] 🔥 Starting FFmpeg burn-in ({chosen_mode}, Font={chosen_font_size}px, Encoder={enc_tag})...",
+        chosen_mode,
+        chosen_font_size,
+        f"[  0.1s] 🔥 Starting FFmpeg ASS hard-burn ({mode_human}, Font={chosen_font_size}px, Encoder={enc_tag})...",
         build_dynamic_status_banner(
             "running",
-            f"Burning Multi-Line Subtitles into MP4 ({enc_tag})...",
-            f"Font Size: {chosen_font_size}px | Mode: {chosen_mode}",
+            f"Burning Subtitles into MP4 ({mode_human})...",
+            f"Font Size: {chosen_font_size}px | Encoder: {enc_tag} | Dual-Style ASS Renderer Active",
             pct=40,
             elapsed_sec=0.1,
         ),
@@ -3481,15 +3721,25 @@ def burn_subtitles_to_mp4(
         )
 
     elapsed = time.time() - t0
-    msg = f"[{elapsed:6.1f}s] 🔥 Burned MP4 complete ({chosen_mode}, Font={chosen_font_size}px, Encoder={enc_tag})!"
+    msg = (
+        f"[{elapsed:6.1f}s] 🔥 Burned MP4 complete! Mode: {mode_human} | "
+        f"Font: {chosen_font_size}px | Encoder: {enc_tag}"
+    )
     done_banner = build_dynamic_status_banner(
         "done",
-        "Burned-in MP4 Ready to Preview & Download!",
-        f"Completed in {elapsed:.1f}s ({enc_tag}, Font={chosen_font_size}px, Multi-Line Preserved)",
+        f"Burned-in MP4 Ready ({mode_human})!",
+        f"Completed in {elapsed:.1f}s ({enc_tag}, Font={chosen_font_size}px, Exact Bilingual/Monolingual Alignment)",
         pct=100,
         elapsed_sec=elapsed,
     )
-    yield burned_mp4, burned_mp4, msg, done_banner
+    yield (
+        burned_mp4,
+        burned_mp4,
+        chosen_mode,
+        chosen_font_size,
+        msg,
+        done_banner,
+    )
 
 
 def on_video_upload(
@@ -3523,11 +3773,12 @@ def load_selected_sample_clip(
 ) -> Tuple[Optional[str], float, float, str, str, str, str]:
     """Loads a pre-packaged classroom sample clip directly into the video player and sets optimal language pair."""
     if not sample_path or not os.path.exists(sample_path):
-        raise gr.Error("Sample clip not found! Please check the `samples/` folder.")
+        raise gr.Error(
+            "Sample clip not found! Please check the `samples/` folder."
+        )
     dur = get_video_duration(sample_path)
     fname = os.path.basename(sample_path)
 
-    # Auto-configure language pair for E-C vs C-E practice clips
     if "sample_02_CE" in fname or "_CE_" in fname:
         src_lang = "zh-TW"
         tgt_lang = "en-US"
@@ -3565,7 +3816,7 @@ def build_app() -> gr.Blocks:
         gr.Markdown(
             """
             # 🎬 SubCraft-PE: AI Video Bilingual Subtitle & C-E / E-C Post-Editing Workbench
-            **⚡ `deepdml/faster-distil-whisper-large-v3.5` Default (Anti-Drift 15s Window) • 🧠 Whole-Passage Context Translation • 🎓 Classroom Sample Clips • 🧭 C-E & E-C MTPE Skills & PDF Report**
+            **⚡ `deepdml/faster-distil-whisper-large-v3.5` Default (Anti-Drift 15s Window) • 🧠 Whole-Passage Context Translation • 🎓 Classroom Sample Clips • 🔥 Mode-Aligned ASS Hard-Burn MP4**
             """
         )
 
@@ -3636,7 +3887,7 @@ def build_app() -> gr.Blocks:
                             )
                         with gr.Row():
                             presentation_mode_input = gr.Dropdown(
-                                label="📺 Bilingual Presentation Mode / 雙語字幕呈現模式",
+                                label="📺 Subtitle Presentation Mode (Live, SRT/VTT & Hard-Burn MP4) / 雙語或單語字幕呈現模式",
                                 choices=PRESENTATION_MODE_CHOICES,
                                 value="bilingual_target_top",
                             )
@@ -3645,7 +3896,7 @@ def build_app() -> gr.Blocks:
                                 maximum=38,
                                 step=1,
                                 value=20,
-                                label="🔠 Subtitle Font Size (Live & Burn-in) / 字幕字體大小",
+                                label="🔠 Subtitle Font Size (Live & Hard-Burn MP4) / 字幕字體大小",
                             )
                         with gr.Row():
                             run_step1_btn = gr.Button(
@@ -3711,7 +3962,7 @@ def build_app() -> gr.Blocks:
                 )
 
                 with gr.Accordion(
-                    "📥 Step 3: Download Subtitles (.SRT/.VTT), Post-Editing Report (.PDF), Project Backup (.JSON) & Burned MP4",
+                    "📥 Step 3: Download Subtitles (.SRT/.VTT), Post-Editing Report (.PDF), Project Backup (.JSON) & Mode-Aligned Burned MP4",
                     open=True,
                 ):
                     with gr.Row():
@@ -3719,10 +3970,10 @@ def build_app() -> gr.Blocks:
                             label="📄 Original Source .SRT / 原文字幕檔"
                         )
                         trans_srt_file = gr.File(
-                            label="📄 Post-Edited / Bilingual .SRT / 雙語或譯後 .SRT"
+                            label="📄 Post-Edited .SRT (Matches Selected Mode: Bilingual or Monolingual) / 依所選模式匯出之 .SRT"
                         )
                         bilingual_vtt_file = gr.File(
-                            label="📄 Web Presentation .VTT / 網頁雙語字幕 .VTT"
+                            label="📄 Web Presentation .VTT (Matches Selected Mode) / 網頁字幕 .VTT"
                         )
                     with gr.Row():
                         pe_report_pdf_file = gr.File(
@@ -3733,13 +3984,13 @@ def build_app() -> gr.Blocks:
                         )
 
                     burn_mp4_btn = gr.Button(
-                        "🔥 Burn Subtitles into MP4 (Preserves Added/Deleted Cues, Multi-Line Breaks & Font Size) / 燒錄字幕至 MP4",
+                        "🔥 Burn Subtitles into MP4 (100% Aligned with Selected Bilingual/Monolingual Mode, Dual-Color Hierarchy & Font Size) / 依所選模式與字級燒錄硬字幕 MP4",
                         variant="primary",
                     )
 
                     with gr.Row():
                         burned_video_player = gr.Video(
-                            label="🎬 Burned-in MP4 Video Preview / 硬字幕完成影片預覽"
+                            label="🎬 Burned-in MP4 Video Preview (Aligned with Your Mode & Font Size) / 硬字幕完成影片預覽"
                         )
                         burned_video_file = gr.File(
                             label="⬇️ Download Burned MP4 / 下載燒錄後 MP4"
@@ -3954,6 +4205,8 @@ def build_app() -> gr.Blocks:
             outputs=[
                 burned_video_player,
                 burned_video_file,
+                presentation_mode_input,
+                font_size_slider,
                 status_log,
                 dynamic_status_banner,
             ],
